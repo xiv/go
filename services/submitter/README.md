@@ -23,8 +23,22 @@ $ psql
     amount varchar(256) NOT NULL,
     hash varchar(256)
 );
-> INSERT INTO transactions (id, external_id, state, destination, amount) VALUES (1, '1', 'pending', 'GCMN2TNLYZ4AQ46LBRV4OKNKM6K4S4Z46AEYHUDUOHGBXZAIIAIHUC6N', '10');
+> INSERT INTO transactions (
+    id, 
+    external_id, 
+    state, 
+    destination, 
+    amount
+) VALUES (
+    1, 
+    '1', 
+    'pending', 
+    'GCMN2TNLYZ4AQ46LBRV4OKNKM6K4S4Z46AEYHUDUOHGBXZAIIAIHUC6N', 
+    '10'
+);
 ```
+
+#### Run it
 
 ```sh
 export SUBMITTER_CHANNEL_SEED=
