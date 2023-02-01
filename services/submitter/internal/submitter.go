@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 
 	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/keypair"
-	"github.com/stellar/go/network"
 	"github.com/stellar/go/support/errors"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/txnbuild"
@@ -19,6 +18,7 @@ type TransactionSubmitter struct {
 	RootAccountSeed string
 	Channels        []*Channel
 	Store           PostgresStore
+	Network         string
 
 	log                 *log.Entry
 	pendingTransactions chan *Transaction
@@ -119,7 +119,7 @@ func (ts *TransactionSubmitter) processTransaction(ctx context.Context, transact
 		return
 	}
 
-	feeBumpTxHash, err := feeBumpTx.Hash(network.PublicNetworkPassphrase)
+	feeBumpTxHash, err := feeBumpTx.Hash(ts.Network)
 	if err != nil {
 		log.WithError(err).Error("error hashing transaction")
 		return
@@ -184,7 +184,7 @@ func (ts *TransactionSubmitter) buildTransaction(t *Transaction, channel *Channe
 		return feeBumpTx, errors.Wrap(err, "error building transaction")
 	}
 
-	tx, err = tx.Sign(network.PublicNetworkPassphrase, rootAccountKp, channelAccountKp)
+	tx, err = tx.Sign(ts.Network, rootAccountKp, channelAccountKp)
 	if err != nil {
 		return feeBumpTx, errors.Wrap(err, "error signing transaction")
 	}
@@ -200,7 +200,7 @@ func (ts *TransactionSubmitter) buildTransaction(t *Transaction, channel *Channe
 		return feeBumpTx, errors.Wrap(err, "error building fee-bump transaction")
 	}
 
-	feeBumpTx, err = feeBumpTx.Sign(network.PublicNetworkPassphrase, rootAccountKp)
+	feeBumpTx, err = feeBumpTx.Sign(ts.Network, rootAccountKp)
 	if err != nil {
 		return feeBumpTx, errors.Wrap(err, "error signing fee-bump transaction")
 	}

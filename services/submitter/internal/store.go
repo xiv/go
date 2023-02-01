@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"context"
@@ -61,7 +61,7 @@ type Transaction struct {
 }
 
 type PostgresStore struct {
-	session *db.Session
+	Session *db.Session
 }
 
 // LoadPendingTransactionsAndMarkSending starts a new DB transaction and:
@@ -71,7 +71,7 @@ type PostgresStore struct {
 //
 // Additionally it will add additional `and` condition to the query (`addQuery`). DO NOT pass user input to this variable!
 func (s *PostgresStore) LoadPendingTransactionsAndMarkSending(ctx context.Context, n int) ([]*Transaction, error) {
-	err := s.session.Begin()
+	err := s.Session.Begin()
 	if err != nil {
 		return nil, err
 	}
@@ -79,14 +79,14 @@ func (s *PostgresStore) LoadPendingTransactionsAndMarkSending(ctx context.Contex
 	committed := false
 	defer func() {
 		if !committed {
-			s.session.Rollback()
+			s.Session.Rollback()
 		}
 	}()
 
 	var transactions []*Transaction
 	// SELECT FOR UPDATE reads the latest available data, setting exclusive locks on each row it reads.
 	query := "SELECT * FROM transactions WHERE state = ? LIMIT ? FOR UPDATE;"
-	err = s.session.SelectRaw(ctx, &transactions, query, string(TransactionStatePending), n)
+	err = s.Session.SelectRaw(ctx, &transactions, query, string(TransactionStatePending), n)
 	if err != nil {
 		return nil, err
 	}
@@ -102,12 +102,12 @@ func (s *PostgresStore) LoadPendingTransactionsAndMarkSending(ctx context.Contex
 		ids = append(ids, transaction.ID)
 	}
 
-	_, err = s.session.ExecRaw(ctx, "UPDATE transactions SET state = ?, sending_at = ? where id in ?", TransactionStateSending, now, ids)
+	_, err = s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ?, sending_at = ? where id in ?", TransactionStateSending, now, ids)
 	if err != nil {
 		return nil, err
 	}
 
-	err = s.session.Commit()
+	err = s.Session.Commit()
 	if err == nil {
 		committed = true
 	}
@@ -115,16 +115,16 @@ func (s *PostgresStore) LoadPendingTransactionsAndMarkSending(ctx context.Contex
 }
 
 func (s *PostgresStore) UpdateTransactionHash(ctx context.Context, tx *Transaction, hash string) error {
-	_, err := s.session.ExecRaw(ctx, "UPDATE transactions SET hash = ? where id in ?", hash, tx.ID)
+	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET hash = ? where id in ?", hash, tx.ID)
 	return err
 }
 
 func (s *PostgresStore) UpdateTransactionError(ctx context.Context, tx *Transaction) error {
-	_, err := s.session.ExecRaw(ctx, "UPDATE transactions SET state = ? where id in ?", TransactionStateError, tx.ID)
+	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ? where id in ?", TransactionStateError, tx.ID)
 	return err
 }
 
 func (s *PostgresStore) UpdateTransactionSuccess(ctx context.Context, tx *Transaction) error {
-	_, err := s.session.ExecRaw(ctx, "UPDATE transactions SET state = ?, sent_at = ? where id in ?", TransactionStateSent, time.Now(), tx.ID)
+	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ?, sent_at = ? where id in ?", TransactionStateSent, time.Now(), tx.ID)
 	return err
 }
