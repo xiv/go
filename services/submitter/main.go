@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/stellar/go/clients/horizonclient"
@@ -13,7 +14,7 @@ import (
 func main() {
 	channels := [1]*internal.Channel{
 		{
-			Seed: "GBEKPFYEFY76INT7JVTZCTIFB3MS5KM3T3RTE2GKP2I6THVHOFZKJHVH",
+			Seed: os.Getenv("SUBMITTER_CHANNEL_SEED"),
 		},
 	}
 	sqlxDB, err := sqlx.Connect("postgres", "dbname=submitter sslmode=disable")
@@ -30,7 +31,7 @@ func main() {
 		Network:         network.TestNetworkPassphrase,
 		Channels:        channels[:],
 		Store:           store,
-		RootAccountSeed: "SBSYXCIQPAG5NOWXEIUM3665VIOZK4AUSDRI5ARQRTQZXADD5PBIGJZ3",
+		RootAccountSeed: os.Getenv("SUBMITTER_ROOT_SEED"),
 	}
 	ts.Start(context.Background())
 }
