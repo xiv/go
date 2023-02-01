@@ -3,10 +3,10 @@ package internal
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/stellar/go/support/db"
 )
 
@@ -14,7 +14,7 @@ import (
 type TransactionState string
 
 // Scan implements database/sql.Scanner interface
-func (s *TransactionState) Scan(src interface{}) error {
+/*func (s *TransactionState) Scan(src interface{}) error {
 	value, ok := src.([]byte)
 	if !ok {
 		return errors.New("cannot convert value to TransactionState")
@@ -26,20 +26,20 @@ func (s *TransactionState) Scan(src interface{}) error {
 // Value implements database/sql/driver.Valuer interface
 func (s TransactionState) Value() (driver.Value, error) {
 	return string(s), nil
-}
+}*/
 
 // Possible states of a transaction.
 const (
 	// TransactionStatePending indicates that a transaction is ready to be sent.
-	TransactionStatePending TransactionState = "pending"
+	TransactionStatePending string = "pending"
 	// TransactionStateSending indicates that a transaction is being processed.
-	TransactionStateSending TransactionState = "sending"
+	TransactionStateSending string = "sending"
 	// TransactionStateSent indicates that a transaction was successfully sent and is in the ledger.
-	TransactionStateSent TransactionState = "sent"
+	TransactionStateSent string = "sent"
 	// TransactionStateSent indicates that there was an error when trying to send this transaction.
 	// Right now it requires a manual check. More complicated logic to determine if tx should be resent
 	// could be built.
-	TransactionStateError TransactionState = "error"
+	TransactionStateError string = "error"
 )
 
 type Transaction struct {
@@ -47,7 +47,7 @@ type Transaction struct {
 	// Contains data that allows to identify origin of this transaction
 	ExternalID string `db:"external_id"`
 	// It's not safe to change this field directly. Use Store methods that will change this in safe DB transaction.
-	State TransactionState `db:"state"`
+	State string `db:"state"`
 	// Started sending a transaction
 	SendingAt *time.Time `db:"sending_at"`
 	// Transaction in the ledger
@@ -90,6 +90,9 @@ func (s *PostgresStore) LoadPendingTransactionsAndMarkSending(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
+	if len(transactions) == 0 {
+		return transactions, nil
+	}
 
 	ids := make([]int64, 0, len(transactions))
 	now := time.Now()
@@ -102,7 +105,11 @@ func (s *PostgresStore) LoadPendingTransactionsAndMarkSending(ctx context.Contex
 		ids = append(ids, transaction.ID)
 	}
 
-	_, err = s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ?, sending_at = ? where id in ?", TransactionStateSending, now, ids)
+	q, qArgs, err := sqlx.In("UPDATE transactions SET state = ?, sending_at = ? where id in (?)", TransactionStateSending, now, ids)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.Session.ExecRaw(ctx, q, qArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -115,16 +122,16 @@ func (s *PostgresStore) LoadPendingTransactionsAndMarkSending(ctx context.Contex
 }
 
 func (s *PostgresStore) UpdateTransactionHash(ctx context.Context, tx *Transaction, hash string) error {
-	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET hash = ? where id in ?", hash, tx.ID)
+	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET hash = ? where id = ?", hash, tx.ID)
 	return err
 }
 
 func (s *PostgresStore) UpdateTransactionError(ctx context.Context, tx *Transaction) error {
-	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ? where id in ?", TransactionStateError, tx.ID)
+	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ? where id = ?", TransactionStateError, tx.ID)
 	return err
 }
 
 func (s *PostgresStore) UpdateTransactionSuccess(ctx context.Context, tx *Transaction) error {
-	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ?, sent_at = ? where id in ?", TransactionStateSent, time.Now(), tx.ID)
+	_, err := s.Session.ExecRaw(ctx, "UPDATE transactions SET state = ?, sent_at = ? where id = ?", TransactionStateSent, time.Now(), tx.ID)
 	return err
 }

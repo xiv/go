@@ -136,11 +136,11 @@ func (ts *TransactionSubmitter) processTransaction(ctx context.Context, transact
 
 	err = ts.submit(feeBumpTx)
 	if err != nil {
-		log.Info("Success submitting transaction")
-		err = ts.Store.UpdateTransactionSuccess(ctx, transaction)
-	} else {
 		log.WithError(err).Error("Error submitting transaction")
 		err = ts.Store.UpdateTransactionError(ctx, transaction)
+	} else {
+		log.Info("Success submitting transaction")
+		err = ts.Store.UpdateTransactionSuccess(ctx, transaction)
 	}
 
 	if err != nil {
