@@ -41,9 +41,10 @@ $ psql
 #### Run it
 
 ```sh
-export SUBMITTER_CHANNEL_SEED=
+export SUBMITTER_NUM_CHANNELS=
 export SUBMITTER_ROOT_SEED=
+export SUBMITTER_MAX_BASE_FEE=
 go run ./main.go
 ```
 
-This should successfully process the payment and save the transaction hash to the DB.
+This should successfully process the payment via a derived channel account and save the transaction hash to the DB.
