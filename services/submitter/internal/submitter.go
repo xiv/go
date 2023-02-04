@@ -16,39 +16,136 @@ import (
 type TransactionSubmitter struct {
 	Horizon         horizonclient.ClientInterface
 	RootAccountSeed string
-	Channels        []*Channel
+	NumChannels     uint
 	Store           PostgresStore
 	Network         string
+	MaxBaseFee      uint
 
 	log                 *log.Entry
+	channels            []*Channel
 	pendingTransactions chan *Transaction
 }
 
-// init initialized struct fields that couldn't be injected
+// derive, create, and load channel accounts
+// initialize private struct variables
 func (ts *TransactionSubmitter) init() (err error) {
 	// Logger
 	ts.log = log.WithFields(log.F{
 		"service": "TransactionSubmitter",
 	})
+	ts.log.SetLevel(log.InfoLevel)
 
-	// Load channels
-	for i, channel := range ts.Channels {
-		ts.log.WithField("i", i).Info("Initializing channel")
-		accountID, sequenceNumber, err := channel.LoadState(ts.Horizon)
+	// pendingTransactions channel
+	ts.pendingTransactions = make(chan *Transaction, len(ts.channels))
+
+	ts.channels, err = DeriveChannelsFromSeed(
+		ts.RootAccountSeed,
+		uint32(ts.NumChannels),
+		0,
+	)
+	if err != nil {
+		return err
+	}
+	for _, channel := range ts.channels {
+		channelKp := keypair.MustParseFull(channel.Seed)
+		ts.log.WithFields(log.F{
+			"account": channelKp.Address(),
+		}).Info("derived channel account")
+	}
+
+	notFoundChannels, err := ts.loadChannels(ts.channels)
+	if err != nil {
+		return err
+	}
+	if len(notFoundChannels) == 0 {
+		return
+	}
+
+	numCreateAccountTxs := len(notFoundChannels) / 100
+	if len(notFoundChannels)%100 != 0 {
+		numCreateAccountTxs += 1
+	}
+
+	rootKp, err := keypair.ParseFull(ts.RootAccountSeed)
+	if err != nil {
+		return err
+	}
+
+	rootAccount, err := ts.Horizon.AccountDetail(horizonclient.AccountRequest{
+		AccountID: rootKp.Address(),
+	})
+	if err != nil {
+		return err
+	}
+
+	var createAccountTxs []*txnbuild.Transaction
+	for i := 0; i < numCreateAccountTxs; i++ {
+		var numOpsForTx int
+		if numOpsForTx = len(notFoundChannels[i*100:]); numOpsForTx > 100 {
+			numOpsForTx = 100
+		}
+		var createAccountOps []txnbuild.Operation
+		for j := i * 100; j < i*100+numOpsForTx; j++ {
+			channelKp := keypair.MustParseFull(notFoundChannels[j].Seed)
+			op := txnbuild.CreateAccount{
+				Destination: channelKp.Address(),
+				Amount:      "1", // TODO: use sponsored reserves
+			}
+			createAccountOps = append(createAccountOps, &op)
+		}
+		tx, err := txnbuild.NewTransaction(txnbuild.TransactionParams{
+			SourceAccount:        &rootAccount,
+			IncrementSequenceNum: true,
+			Operations:           createAccountOps,
+			BaseFee:              int64(ts.MaxBaseFee),
+			Preconditions: txnbuild.Preconditions{
+				TimeBounds: txnbuild.NewInfiniteTimeout(),
+			},
+		})
 		if err != nil {
 			return err
 		}
-		ts.log.WithFields(log.F{
-			"i":               i,
-			"account_id":      accountID,
-			"sequence_number": sequenceNumber,
-		}).Info("Channel initialized")
+		tx, err = tx.Sign(ts.Network, rootKp)
+		if err != nil {
+			return err
+		}
+		createAccountTxs = append(createAccountTxs, tx)
 	}
 
-	// pendingTransactions channel
-	ts.pendingTransactions = make(chan *Transaction, len(ts.Channels))
+	for _, tx := range createAccountTxs {
+		if ts.submitTx(tx) != nil {
+			// TODO: handle this error more thoughtfully
+			// the only possible error returned is for insufficient funds
+			return
+		}
+	}
+
+	notFoundChannels, err = ts.loadChannels(notFoundChannels)
+	if err != nil {
+		return err
+	}
+	if len(notFoundChannels) != 0 {
+		return errors.New("unable to create the number of channels requested")
+	}
 
 	return
+}
+
+func (ts *TransactionSubmitter) loadChannels(channels []*Channel) (notFoundChannels []*Channel, err error) {
+	for _, channel := range channels {
+		if err := channel.LoadState(ts.Horizon); err != nil {
+			if horizonclient.IsNotFoundError(err) {
+				notFoundChannels = append(notFoundChannels, channel)
+				continue
+			}
+			return notFoundChannels, err
+		}
+		ts.log.WithFields(log.F{
+			"account_id":      channel.accountID,
+			"sequence_number": channel.sequenceNumber,
+		}).Info("Channel initialized")
+	}
+	return notFoundChannels, nil
 }
 
 // Start starts the service. This service works in the following way.
@@ -71,16 +168,16 @@ func (ts *TransactionSubmitter) Start(ctx context.Context) {
 		ts.log.WithError(err).Fatal("Could not initialize TransactionSubmitter")
 	}
 
-	for _, channel := range ts.Channels {
+	for _, channel := range ts.channels {
 		go ts.listenForPendingTransactions(ctx, channel)
 	}
 
 	for {
 		time.Sleep(time.Second)
-		if len(ts.Channels) == len(ts.pendingTransactions) {
+		if len(ts.channels) == len(ts.pendingTransactions) {
 			continue
 		}
-		newPendingTransactions, err := ts.Store.LoadPendingTransactionsAndMarkSending(ctx, len(ts.Channels)-len(ts.pendingTransactions))
+		newPendingTransactions, err := ts.Store.LoadPendingTransactionsAndMarkSending(ctx, len(ts.channels)-len(ts.pendingTransactions))
 		if err != nil {
 			ts.log.WithError(err).Error("Error loading queued transactions")
 			continue
@@ -134,7 +231,7 @@ func (ts *TransactionSubmitter) processTransaction(ctx context.Context, transact
 		return
 	}
 
-	err = ts.submit(feeBumpTx)
+	err = ts.submitFeeBumpTx(feeBumpTx)
 	if err != nil {
 		log.WithError(err).Error("Error submitting transaction")
 		err = ts.Store.UpdateTransactionError(ctx, transaction)
@@ -210,7 +307,12 @@ func (ts *TransactionSubmitter) buildTransaction(t *Transaction, channel *Channe
 
 // Submits the transaction and handles any recoverable errors until it gets included in a ledger.
 // Returns any error that is not recoverable.
-func (ts *TransactionSubmitter) submit(t *txnbuild.FeeBumpTransaction) (err error) {
+func (ts *TransactionSubmitter) submitFeeBumpTx(t *txnbuild.FeeBumpTransaction) (err error) {
 	_, err = ts.Horizon.SubmitFeeBumpTransactionWithOptions(t, horizonclient.SubmitTxOpts{SkipMemoRequiredCheck: true})
+	return err
+}
+
+func (ts *TransactionSubmitter) submitTx(t *txnbuild.Transaction) (err error) {
+	_, err = ts.Horizon.SubmitTransactionWithOptions(t, horizonclient.SubmitTxOpts{SkipMemoRequiredCheck: true})
 	return err
 }
