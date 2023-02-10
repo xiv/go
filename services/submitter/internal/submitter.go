@@ -61,10 +61,19 @@ func (ts *TransactionSubmitter) init() (err error) {
 		return
 	}
 
-	numCreateAccountTxs := len(notFoundChannels) / 100
-	if len(notFoundChannels)%100 != 0 {
+	ts.log.WithFields(log.F{
+		"num_accounts": len(notFoundChannels),
+	}).Info("creating channel accounts")
+
+	// we're limited to 19 account creation ops per tx due to the 20 signatures per tx limit, so
+	numCreateAccountTxs := len(notFoundChannels) / 19
+	if len(notFoundChannels)%19 != 0 {
 		numCreateAccountTxs += 1
 	}
+
+	ts.log.WithFields(log.F{
+		"num_transactions": numCreateAccountTxs,
+	}).Info("submitting transactions to create accounts")
 
 	rootKp, err := keypair.ParseFull(ts.RootAccountSeed)
 	if err != nil {
@@ -80,23 +89,42 @@ func (ts *TransactionSubmitter) init() (err error) {
 
 	var createAccountTxs []*txnbuild.Transaction
 	for i := 0; i < numCreateAccountTxs; i++ {
+		ts.log.WithFields(log.F{
+			"i": i,
+		}).Info("building transaction")
 		var numOpsForTx int
-		if numOpsForTx = len(notFoundChannels[i*100:]); numOpsForTx > 100 {
-			numOpsForTx = 100
+		if numOpsForTx = len(notFoundChannels[i*19:]); numOpsForTx > 19 {
+			numOpsForTx = 19
 		}
-		var createAccountOps []txnbuild.Operation
-		for j := i * 100; j < i*100+numOpsForTx; j++ {
+		var txKps = []*keypair.Full{rootKp}
+		var sponsoredCreateAccountOps []txnbuild.Operation
+		for j := i * 19; j < i*19+numOpsForTx; j++ {
+			ts.log.WithFields(log.F{
+				"j": j,
+			}).Info("building operations")
 			channelKp := keypair.MustParseFull(notFoundChannels[j].Seed)
-			op := txnbuild.CreateAccount{
-				Destination: channelKp.Address(),
-				Amount:      "1", // TODO: use sponsored reserves
+			beginSponsoringOp := txnbuild.BeginSponsoringFutureReserves{
+				SponsoredID: channelKp.Address(),
 			}
-			createAccountOps = append(createAccountOps, &op)
+			createAccountOp := txnbuild.CreateAccount{
+				Destination: channelKp.Address(),
+				Amount:      "0",
+			}
+			endSponsoringOp := txnbuild.EndSponsoringFutureReserves{
+				SourceAccount: channelKp.Address(),
+			}
+			txKps = append(txKps, channelKp)
+			sponsoredCreateAccountOps = append(
+				sponsoredCreateAccountOps,
+				&beginSponsoringOp,
+				&createAccountOp,
+				&endSponsoringOp,
+			)
 		}
 		tx, err := txnbuild.NewTransaction(txnbuild.TransactionParams{
 			SourceAccount:        &rootAccount,
 			IncrementSequenceNum: true,
-			Operations:           createAccountOps,
+			Operations:           sponsoredCreateAccountOps,
 			BaseFee:              int64(ts.MaxBaseFee),
 			Preconditions: txnbuild.Preconditions{
 				TimeBounds: txnbuild.NewInfiniteTimeout(),
@@ -105,18 +133,34 @@ func (ts *TransactionSubmitter) init() (err error) {
 		if err != nil {
 			return err
 		}
-		tx, err = tx.Sign(ts.Network, rootKp)
+		txBase64, err := tx.Base64()
 		if err != nil {
 			return err
 		}
+		ts.log.WithFields(log.F{
+			"transaction": txBase64,
+		}).Info("signing transaction")
+		tx, err = tx.Sign(ts.Network, txKps...)
+		if err != nil {
+			return err
+		}
+		txBase64, err = tx.Base64()
+		if err != nil {
+			return err
+		}
+		ts.log.WithFields(log.F{
+			"transaction": txBase64,
+		}).Info("adding transaction to set")
 		createAccountTxs = append(createAccountTxs, tx)
 	}
 
 	for _, tx := range createAccountTxs {
-		if ts.submitTx(tx) != nil {
+		if err = ts.submitTx(tx); err != nil {
 			// TODO: handle this error more thoughtfully
 			// the only possible error returned is for insufficient funds
-			return
+			hErr := horizonclient.GetError(err)
+			ts.log.Infof("submission error: {}", hErr.Problem)
+			return err
 		}
 	}
 
@@ -125,6 +169,9 @@ func (ts *TransactionSubmitter) init() (err error) {
 		return err
 	}
 	if len(notFoundChannels) != 0 {
+		ts.log.WithFields(log.F{
+			"not_found_channels": notFoundChannels,
+		}).Info("couldn't fetch channels after attempting to create them")
 		return errors.New("unable to create the number of channels requested")
 	}
 
@@ -166,6 +213,7 @@ func (ts *TransactionSubmitter) Start(ctx context.Context) {
 	err := ts.init()
 	if err != nil {
 		ts.log.WithError(err).Fatal("Could not initialize TransactionSubmitter")
+		return
 	}
 
 	for _, channel := range ts.channels {
